@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { deepStrictEqual, doesNotThrow, equal, ok, strictEqual, throws } from 'assert';
-import { commands, ConfigurationTarget, Disposable, env, EnvironmentVariableCollection, EnvironmentVariableMutator, EnvironmentVariableMutatorOptions, EnvironmentVariableMutatorType, EnvironmentVariableScope, EventEmitter, ExtensionContext, extensions, ExtensionTerminalOptions, Pseudoterminal, Terminal, TerminalDimensions, TerminalExitReason, TerminalOptions, TerminalState, UIKind, Uri, window, workspace } from 'vscode';
+import { commands, ConfigurationTarget, Disposable, env, EnvironmentVariableMutator, EnvironmentVariableMutatorOptions, EnvironmentVariableMutatorType, EventEmitter, ExtensionContext, extensions, ExtensionTerminalOptions, Pseudoterminal, Terminal, TerminalDimensions, TerminalExitReason, TerminalOptions, TerminalState, UIKind, Uri, window, workspace } from 'vscode';
 import { assertNoRpc, poll } from '../utils';
 
 // Disable terminal tests:
@@ -231,19 +231,40 @@ import { assertNoRpc, poll } from '../utils';
 			});
 		});
 
-		test('onDidChangeTerminalState should fire after writing to a terminal', async () => {
+		test('onDidChangeTerminalState should fire with isInteractedWith after writing to a terminal', async () => {
 			const terminal = window.createTerminal();
-			deepStrictEqual(terminal.state, { isInteractedWith: false });
+			strictEqual(terminal.state.isInteractedWith, false);
 			const eventState = await new Promise<TerminalState>(r => {
 				disposables.push(window.onDidChangeTerminalState(e => {
-					if (e === terminal) {
+					if (e === terminal && e.state.isInteractedWith) {
 						r(e.state);
 					}
 				}));
 				terminal.sendText('test');
 			});
-			deepStrictEqual(eventState, { isInteractedWith: true });
-			deepStrictEqual(terminal.state, { isInteractedWith: true });
+			strictEqual(eventState.isInteractedWith, true);
+			await new Promise<void>(r => {
+				disposables.push(window.onDidCloseTerminal(t => {
+					if (t === terminal) {
+						r();
+					}
+				}));
+				terminal.dispose();
+			});
+		});
+
+		test('onDidChangeTerminalState should fire with shellType when created', async () => {
+			const terminal = window.createTerminal();
+			if (terminal.state.shellType) {
+				return;
+			}
+			await new Promise<void>(r => {
+				disposables.push(window.onDidChangeTerminalState(e => {
+					if (e === terminal && e.state.shellType) {
+						r();
+					}
+				}));
+			});
 			await new Promise<void>(r => {
 				disposables.push(window.onDidCloseTerminal(t => {
 					if (t === terminal) {
@@ -387,7 +408,8 @@ import { assertNoRpc, poll } from '../utils';
 		});
 
 		suite('window.onDidWriteTerminalData', () => {
-			test('should listen to all future terminal data events', function (done) {
+			// still flaky with retries, skipping https://github.com/microsoft/vscode/issues/193505
+			test.skip('should listen to all future terminal data events', function (done) {
 				// This test has been flaky in the past but it's not clear why, possibly because
 				// events from previous tests polluting the event recording in this test. Retries
 				// was added so we continue to have coverage of the onDidWriteTerminalData API.
@@ -912,11 +934,10 @@ import { assertNoRpc, poll } from '../utils';
 			});
 
 			test('get and forEach should work (scope)', () => {
-				// TODO: Remove cast once `envCollectionWorkspace` API is finalized.
-				const collection = extensionContext.environmentVariableCollection as (EnvironmentVariableCollection & { getScopedEnvironmentVariableCollection(scope: EnvironmentVariableScope): EnvironmentVariableCollection });
+				const collection = extensionContext.environmentVariableCollection;
 				disposables.push({ dispose: () => collection.clear() });
 				const scope = { workspaceFolder: { uri: Uri.file('workspace1'), name: 'workspace1', index: 0 } };
-				const scopedCollection = collection.getScopedEnvironmentVariableCollection(scope);
+				const scopedCollection = collection.getScoped(scope);
 				scopedCollection.replace('A', 'scoped~a2~');
 				scopedCollection.append('B', 'scoped~b2~');
 				scopedCollection.prepend('C', 'scoped~c2~');
@@ -928,7 +949,7 @@ import { assertNoRpc, poll } from '../utils';
 					applyAtProcessCreation: true,
 					applyAtShellIntegration: false
 				};
-				const expectedScopedCollection = collection.getScopedEnvironmentVariableCollection(scope);
+				const expectedScopedCollection = collection.getScoped(scope);
 				deepStrictEqual(expectedScopedCollection.get('A'), { value: 'scoped~a2~', type: EnvironmentVariableMutatorType.Replace, options: defaultOptions });
 				deepStrictEqual(expectedScopedCollection.get('B'), { value: 'scoped~b2~', type: EnvironmentVariableMutatorType.Append, options: defaultOptions });
 				deepStrictEqual(expectedScopedCollection.get('C'), { value: 'scoped~c2~', type: EnvironmentVariableMutatorType.Prepend, options: defaultOptions });
@@ -953,8 +974,8 @@ function sanitizeData(data: string): string {
 
 	// Strip escape sequences so winpty/conpty doesn't cause flakiness, do for all platforms for
 	// consistency
-	const terminalCodesRegex = /(?:\u001B|\u009B)[\[\]()#;?]*(?:(?:(?:[a-zA-Z0-9]*(?:;[a-zA-Z0-9]*)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[0-9A-PR-TZcf-ntqry=><~]))/g;
-	data = data.replace(terminalCodesRegex, '');
+	const CSI_SEQUENCE = /(:?(:?\x1b\[|\x9B)[=?>!]?[\d;:]*["$#'* ]?[a-zA-Z@^`{}|~])|(:?\x1b\].*?\x07)/g;
+	data = data.replace(CSI_SEQUENCE, '');
 
 	return data;
 }
